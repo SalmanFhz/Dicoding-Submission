@@ -159,7 +159,7 @@ def create_city_mapping(df):
     return city_mapping
 
 # Load data
-all_df = pd.read_csv("D:/Dataanalyst/python/baru/latihan/all_data.csv")
+all_df = pd.read_csv("all_data.csv")
 
 datetime_columns = ["order_date", "delivery_date"]
 all_df.sort_values(by="order_date", inplace=True)
