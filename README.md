@@ -1,11 +1,10 @@
 # Dicoding-Submission
-how to run dicoding.py:
-cd /path_to_your_file.py
-example:
-**windows terminal:**
-cd /D D:/Dfile/python/project/latihan
-and then 
-streamlit run dicoding.py 
-or you can directly run like this
-streamlit run d:/Dfile/python/project/latihan/dicoding.py
+how to run dicoding.py:<br>
+cd /path_to_your_file.py<br>
+example:<br>
+**windows terminal:**<br>
+cd /D D:/Dfile/python/project/latihan<br>
+and then ---> streamlit run dicoding.py <br>
+or you can directly run like this<br>
+streamlit run d:/Dfile/python/project/latihan/dicoding.py<br>
 Built by Salman Fadhilurrohman
