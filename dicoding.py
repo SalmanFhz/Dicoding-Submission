@@ -3,6 +3,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
 from babel.numbers import format_currency
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
 
 # Set page config and custom theme
 st.set_page_config(
@@ -159,7 +163,7 @@ def create_city_mapping(df):
     return city_mapping
 
 # Load data
-all_df = pd.read_csv("all_data.csv")
+all_df = pd.read_csv("D:/Dataanalyst/python/baru/latihan/project/clean_data.csv")
 
 datetime_columns = ["order_date", "delivery_date"]
 all_df.sort_values(by="order_date", inplace=True)
@@ -196,6 +200,97 @@ bydaerah_df = create_bydaerah_df(main_df)
 rfm_df = create_rfm_df(main_df)
 
 st.header('Dashboard Pelatihan Dicoding Salman Fadhilurrohman ﾟ ⋆ ﾟ ☂︎ ⋆ ﾟﾟ ⋆ ')
+# st.subheader('Peramalan 30 hari Kedepan')
+
+# Feature Engineering
+penjualan_harian_df['day_of_week'] = penjualan_harian_df['order_date'].dt.dayofweek
+penjualan_harian_df['month'] = penjualan_harian_df['order_date'].dt.month
+penjualan_harian_df['day'] = penjualan_harian_df['order_date'].dt.day
+
+# Menentukan fitur dan target
+features = ['day_of_week', 'month', 'day']
+target = 'order_count'
+X = penjualan_harian_df[features]
+y = penjualan_harian_df[target]
+
+# Membagi data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# Membuat DMatrix untuk XGBoost
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dtest = xgb.DMatrix(X_test, label=y_test)
+
+# Mengatur parameter XGBoost
+params = {
+    'objective': 'reg:squarederror',
+    'eval_metric': 'mae',
+    'max_depth': 5,
+    'eta': 0.1
+}
+
+# Melatih model
+model = xgb.train(params, dtrain, num_boost_round=100)
+
+# Melakukan prediksi
+y_pred = model.predict(dtest)
+
+# Evaluasi Model
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+
+
+
+# Menentukan jumlah hari ke depan untuk peramalan
+forecast_days = 30
+
+# Membuat dataframe untuk tanggal masa depan
+last_date = penjualan_harian_df['order_date'].max()
+future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=forecast_days)
+
+# Membuat dataframe fitur untuk tanggal masa depan
+future_df = pd.DataFrame({
+    'order_date': future_dates,
+    'day_of_week': future_dates.dayofweek,
+    'month': future_dates.month,
+    'day': future_dates.day
+})
+future_features = future_df[features]
+future_dmatrix = xgb.DMatrix(future_features)
+
+# Melakukan prediksi untuk masa depan
+future_pred = model.predict(future_dmatrix)
+future_df['predicted_order_count'] = future_pred
+
+# Menampilkan Grafik Peramalan
+st.subheader('Peramalan Penjualan 30 Hari ke Depan')
+fig, ax = plt.subplots(figsize=(16, 8))
+ax.plot(penjualan_harian_df['order_date'], penjualan_harian_df['order_count'], label='Penjualan Aktual', color='blue')
+ax.plot(future_df['order_date'], future_df['predicted_order_count'], label='Prediksi Penjualan', color='red', linestyle='--')
+ax.set_title("Peramalan Penjualan Menggunakan XGBoost", fontsize=20)
+ax.set_xlabel("Tanggal", fontsize=15)
+ax.set_ylabel("Jumlah Penjualan", fontsize=15)
+ax.legend(fontsize=12)
+ax.grid(True)
+st.pyplot(fig)
+# Menampilkan hasil evaluasi di Streamlit
+st.write(f"### Mean Absolute Error (MAE): {mae:.2f}")
+st.write(f"### Mean Squared Error (MSE): {mse:.2f}")
+st.write(f"### Root Mean Squared Error (RMSE): {rmse:.2f}")
+
+# Kesimpulan
+st.write("Dari hasil forecasting menggunakan XGBoost, jika dilihat dari hasil evaluasi menggunakan Mean Absolute Error (MAE), Mean Squared Error (MSE), dan Root Mean Squared Error (RMSE), terlihat akurasi dari hasil forecasting cukup baik.")
+st.write(f"Dimana MAE merupakan rata-rata kesalahan antara nilai prediksi dan nilai aktual, dengan nilai MAE sebesar {mae:.2f}.")
+st.write(f"Kemudian MSE merupakan rata-rata dari kesalahan kuadrat, di mana nilainya cukup kecil, berada di angka {mse:.2f}.")
+st.write(f"Terakhir, RMSE (rata-rata deviasi dari prediksi) memiliki nilai sebesar {rmse:.2f}, yang menggambarkan rata-rata deviasi dari hasil prediksi sebesar {rmse:.2f} unit. Ini memberikan gambaran tentang seberapa jauh prediksi melenceng dari nilai aktual.")
+
+
+
+
+# # Menampilkan Tabel Peramalan
+# st.subheader('Tabel Peramalan Penjualan 30 Hari ke Depan')
+# st.write(future_df[['order_date', 'predicted_order_count']].rename(columns={'order_date': 'Tanggal', 'predicted_order_count': 'Prediksi Penjualan'}))
+
 st.subheader('Daily Selling')
 
 col1, col2 = st.columns(2)
