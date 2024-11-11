@@ -6,7 +6,20 @@ from babel.numbers import format_currency
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.ensemble import RandomForestRegressor
 import numpy as np
+from datetime import timedelta
+from scipy import stats
+from scipy.stats import ttest_ind, mannwhitneyu, f_oneway, kruskal
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from statsmodels.formula.api import poisson
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.stattools import adfuller, acf, pacf
+from statsmodels.tsa.seasonal import seasonal_decompose
+import holidays
+import itertools
+
 
 # Set page config and custom theme
 st.set_page_config(
@@ -21,76 +34,6 @@ st.set_page_config(
     }
 )
 
-# Custom theme using CSS
-st.markdown("""
-    <style>
-    .main {
-        background: linear-gradient(
-            45deg,
-            #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8f00ff
-        );
-        background-size: 400% 400%;
-        animation: rainbow 15s ease infinite;
-        color: black; /* Untuk memastikan teks tetap terbaca */
-    }
-    h2{
-        color:black;
-    }
-    h3{
-        color:black;
-    }
-    .st-emotion-cache-q49buc{
-        color:black;
-    }
-    .st-emotion-cache-efbu8t{
-        color:black;
-    }
-    @keyframes rainbow {
-        0% {
-            background-position: 0% 50%;
-        }
-        50% {
-            background-position: 100% 50%;
-        }
-        100% {
-            background-position: 0% 50%;
-        }
-    }
-    .stButton>button {
-        color: #4F8BF9;
-        border-radius: 50%;
-        height: 3em;
-        width: 3em;
-    }
-    .stTextInput>div>div>input {
-        color: #4F8BF9;
-    }
-    [data-testid="stSidebar"] {
-        background: linear-gradient(
-            45deg,
-            #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8f00ff
-        );
-        background-size: 400% 400%;
-        animation: rainbow 15s ease infinite;
-    }
-
-    @keyframes rainbow {
-        0% {
-            background-position: 0% 50%;
-        }
-        50% {
-            background-position: 100% 50%;
-        }
-        100% {
-            background-position: 0% 50%;
-        }
-    }
-
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
-        color: white;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
 # Set the style and color palette
 sns.set_style("whitegrid")
@@ -98,586 +41,770 @@ sns.set_palette("deep")
 
 # sns.set(style='whitegrid')
 
-def create_penjualan_df(df):
-    penjualan_df = df.resample(rule='D', on='order_date').agg({
-        "order_id": "nunique",
-        "total_price": "sum"
+def create_pengunjung_df(df):
+    pengunjung_df = df.resample(rule='D', on='dteday').agg({
+        "hr": "nunique",
+        "cnt": "sum"
     }).reset_index()
     
-    penjualan_df.rename(columns={
-        "order_id": "order_count",
-        "total_price": "revenue"
+    pengunjung_df.rename(columns={
+        "hr": "order_count",
+        "cnt": "total_visitors"
     }, inplace=True)
     
-    return penjualan_df
+    return pengunjung_df
 
-def create_sum_penjualan_barang_df(df):
-    sum_penjualan_barang_df = df.groupby("product_name").quantity_x.sum().sort_values(ascending=False).reset_index()
-    return sum_penjualan_barang_df
-
-def create_byjk_df(df):
-    byjk_df = df.groupby(by="gender").customer_id.nunique().reset_index()
-    byjk_df.rename(columns={
-        "customer_id": "customer_count"
-    }, inplace=True)
-    
-    return byjk_df
-
-def create_byumur_df(df):
-    byumur_df = df.groupby(by="age_group").customer_id.nunique().reset_index()
-    byumur_df.rename(columns={
-        "customer_id": "customer_count"
-    }, inplace=True)
-    
-    return byumur_df
-
-def create_bydaerah_df(df):
-    bydaerah_df = df.groupby(by="state").customer_id.nunique().reset_index()
-    bydaerah_df.rename(columns={
-        "customer_id": "customer_count"
-    }, inplace=True)
-    
-    return bydaerah_df
-
-def create_rfm_df(df):
-    rfm_df = df.groupby(by="customer_id", as_index=False).agg({
-        "order_date": "max",
-        "order_id": "nunique",
-        "total_price": "sum"
-    })
-    rfm_df.columns = ["customer_id", "max_order_timestamp", "frequency", "monetary"]
-    
-    rfm_df["max_order_timestamp"] = rfm_df["max_order_timestamp"].dt.date
-    recent_date = df["order_date"].dt.date.max()
-    rfm_df["recency"] = rfm_df["max_order_timestamp"].apply(lambda x: (recent_date - x).days)
-    rfm_df.drop("max_order_timestamp", axis=1, inplace=True)
-    
-    return rfm_df
-
-def create_city_mapping(df):
-    city_mapping = df.groupby('city').customer_id.nunique().reset_index()
-    city_mapping.rename(columns={
-        "customer_id": "customer_count"
-    }, inplace=True)
-    
-    return city_mapping
+#load data
+@st.cache_data
+def load_data(file_path):
+    df = pd.read_csv(file_path)
+    df['dteday'] = pd.to_datetime(df['dteday'])
+    df.sort_values(by="dteday", inplace=True)
+    return df.reset_index(drop=True)
 
 # Load data
-all_df = pd.read_csv("D:/Dataanalyst/python/baru/latihan/project/clean_data.csv")
+all_df = load_data("hour.csv")
 
-datetime_columns = ["order_date", "delivery_date"]
-all_df.sort_values(by="order_date", inplace=True)
+
+# Convert dteday to datetime
+all_df['dteday'] = pd.to_datetime(all_df['dteday'])
+all_df.sort_values(by="dteday", inplace=True)
 all_df.reset_index(drop=True, inplace=True)
 
-# Convert date columns to datetime format
-for column in datetime_columns:
-    all_df[column] = pd.to_datetime(all_df[column])
+# Get minimum and maximum dates
+min_date = all_df["dteday"].min()
+max_date = all_df["dteday"].max()
 
-# Get minimum and maximum dates from the dataset
-min_date = all_df["order_date"].min()
-max_date = all_df["order_date"].max()
-
-# Sidebar setup for Streamlit
+# Sidebar setup
 with st.sidebar:
-    st.image("https://github.com/dicodingacademy/assets/raw/main/logo.png")
+    st.image("https://www.itcilo.org/sites/default/files/styles/fullscreen_image/public/courses/cover-images/A9017179.jpeg?h=3de5bcb3&itok=G0R4J3RO")
     
     start_date, end_date = st.date_input(
-        label='Rentang Waktu', min_value=min_date,
-        max_value=max_date,
-        value=[min_date, max_date]
+        label='Rentang Waktu',
+        min_value=min_date.date(),
+        max_value=max_date.date(),
+        value=[min_date.date(), max_date.date()]
     )
 
-# Filter the dataframe based on the selected date range
-main_df = all_df[(all_df["order_date"] >= pd.to_datetime(start_date)) &
-                 (all_df["order_date"] <= pd.to_datetime(end_date))]
-
-# Generate summary dataframes
-penjualan_harian_df = create_penjualan_df(main_df)  
-sum_penjualan_barang_df = create_sum_penjualan_barang_df(main_df)
-byjk_df = create_byjk_df(main_df)
-byumur_df = create_byumur_df(main_df)
-bydaerah_df = create_bydaerah_df(main_df)
-rfm_df = create_rfm_df(main_df)
-
-st.header('Dashboard Pelatihan Dicoding Salman Fadhilurrohman ﾟ ⋆ ﾟ ☂︎ ⋆ ﾟﾟ ⋆ ')
-# st.subheader('Peramalan 30 hari Kedepan')
-
-# Feature Engineering
-penjualan_harian_df['day_of_week'] = penjualan_harian_df['order_date'].dt.dayofweek
-penjualan_harian_df['month'] = penjualan_harian_df['order_date'].dt.month
-penjualan_harian_df['day'] = penjualan_harian_df['order_date'].dt.day
-
-# Menentukan fitur dan target
-features = ['day_of_week', 'month', 'day']
-target = 'order_count'
-X = penjualan_harian_df[features]
-y = penjualan_harian_df[target]
-
-# Membagi data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-
-# Membuat DMatrix untuk XGBoost
-dtrain = xgb.DMatrix(X_train, label=y_train)
-dtest = xgb.DMatrix(X_test, label=y_test)
-
-# Mengatur parameter XGBoost
-params = {
-    'objective': 'reg:squarederror',
-    'eval_metric': 'mae',
-    'max_depth': 5,
-    'eta': 0.1
-}
-
-# Melatih model
-model = xgb.train(params, dtrain, num_boost_round=100)
-
-# Melakukan prediksi
-y_pred = model.predict(dtest)
-
-# Evaluasi Model
-mae = mean_absolute_error(y_test, y_pred)
-mse = mean_squared_error(y_test, y_pred)
-rmse = np.sqrt(mse)
+st.header('Dashboard Bike Sharing Analysis ﾟ ⋆ ﾟ ☂︎ ⋆ ﾟﾟ ⋆ ')
 
 
 
-# Menentukan jumlah hari ke depan untuk peramalan
-forecast_days = 30
+# Generate daily aggregation for visitors
+pengunjung_harian_df = create_pengunjung_df(all_df)  # Call the function to create the daily dataframe
 
-# Membuat dataframe untuk tanggal masa depan
-last_date = penjualan_harian_df['order_date'].max()
-future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=forecast_days)
-
-# Membuat dataframe fitur untuk tanggal masa depan
-future_df = pd.DataFrame({
-    'order_date': future_dates,
-    'day_of_week': future_dates.dayofweek,
-    'month': future_dates.month,
-    'day': future_dates.day
-})
-future_features = future_df[features]
-future_dmatrix = xgb.DMatrix(future_features)
-
-# Melakukan prediksi untuk masa depan
-future_pred = model.predict(future_dmatrix)
-future_df['predicted_order_count'] = future_pred
-
-# Menampilkan Grafik Peramalan
-st.subheader('Peramalan Penjualan 30 Hari ke Depan')
-fig, ax = plt.subplots(figsize=(16, 8))
-ax.plot(penjualan_harian_df['order_date'], penjualan_harian_df['order_count'], label='Penjualan Aktual', color='blue')
-ax.plot(future_df['order_date'], future_df['predicted_order_count'], label='Prediksi Penjualan', color='red', linestyle='--')
-ax.set_title("Peramalan Penjualan Menggunakan XGBoost", fontsize=20)
-ax.set_xlabel("Tanggal", fontsize=15)
-ax.set_ylabel("Jumlah Penjualan", fontsize=15)
-ax.legend(fontsize=12)
-ax.grid(True)
-st.pyplot(fig)
-# Menampilkan hasil evaluasi di Streamlit
-st.write(f"### Mean Absolute Error (MAE): {mae:.2f}")
-st.write(f"### Mean Squared Error (MSE): {mse:.2f}")
-st.write(f"### Root Mean Squared Error (RMSE): {rmse:.2f}")
-
-# Kesimpulan
-st.write("Dari hasil forecasting menggunakan XGBoost, jika dilihat dari hasil evaluasi menggunakan Mean Absolute Error (MAE), Mean Squared Error (MSE), dan Root Mean Squared Error (RMSE), terlihat akurasi dari hasil forecasting cukup baik.")
-st.write(f"Dimana MAE merupakan rata-rata kesalahan antara nilai prediksi dan nilai aktual, dengan nilai MAE sebesar {mae:.2f}.")
-st.write(f"Kemudian MSE merupakan rata-rata dari kesalahan kuadrat, di mana nilainya cukup kecil, berada di angka {mse:.2f}.")
-st.write(f"Terakhir, RMSE (rata-rata deviasi dari prediksi) memiliki nilai sebesar {rmse:.2f}, yang menggambarkan rata-rata deviasi dari hasil prediksi sebesar {rmse:.2f} unit. Ini memberikan gambaran tentang seberapa jauh prediksi melenceng dari nilai aktual.")
+# Display Forecast Table
+# st.subheader('Tabel Peramalan Pengunjung 30 Hari ke Depan')
+# future_forecast_table = future_df[['dteday', 'predicted_visitors']].rename(
+#     columns={'dteday': 'Tanggal', 'predicted_visitors': 'Prediksi Pengunjung'}
+# )
+# st.write(future_forecast_table)
 
 
+st.subheader('Monthly Visitor Count')
+# Modify the function to group by month and sum the cnt values for total visitors
+def create_pengunjung_bulanan_df(df):
+    pengunjung_bulanan_df = df.resample(rule='M', on='dteday').agg({
+        "cnt": "sum"
+    }).reset_index()
+    
+    pengunjung_bulanan_df.rename(columns={
+        "cnt": "total_visitors"
+    }, inplace=True)
+    
+    return pengunjung_bulanan_df
 
+# Create the monthly data for visitors
+pengunjung_bulanan_df = create_pengunjung_bulanan_df(all_df)
 
-# # Menampilkan Tabel Peramalan
-# st.subheader('Tabel Peramalan Penjualan 30 Hari ke Depan')
-# st.write(future_df[['order_date', 'predicted_order_count']].rename(columns={'order_date': 'Tanggal', 'predicted_order_count': 'Prediksi Penjualan'}))
-
-st.subheader('Daily Selling')
-
+# Monthly Visitor Section
+# st.subheader('Monthly Visitors')
 col1, col2 = st.columns(2)
 
+# Monthly Visitors and Metrics
 with col1:
-    total_orders = penjualan_harian_df.order_count.sum()
-    st.metric("Total of Selling", value=total_orders)
-    
-with col2:
-    total_revenue = format_currency(penjualan_harian_df.revenue.sum(), "AUD", locale='es_CO')
-    st.metric("Total of Revenue", value=total_revenue)
+    total_monthly_visits = pengunjung_bulanan_df['total_visitors'].sum()
+    st.metric("Total Monthly Visits", value=total_monthly_visits)
 
-# Plot the line chart with data labels
+with col2:
+    avg_monthly_visits = pengunjung_bulanan_df['total_visitors'].mean()
+    st.metric("Average Monthly Visits", value=int(avg_monthly_visits))
+
+# Plot Monthly Visitor Counts with Data Labels
 fig, ax = plt.subplots(figsize=(16, 8))
 ax.plot(
-    penjualan_harian_df["order_date"],
-    penjualan_harian_df["order_count"],
+    pengunjung_bulanan_df["dteday"],
+    pengunjung_bulanan_df["total_visitors"],
     marker='o',
     linewidth=2,
-    color="#5c4219"
+    color="#5c4219",
+    label="Monthly Visitor Count"
 )
 
-# Add data labels to the line chart
-for i, value in enumerate(penjualan_harian_df["order_count"]):
-    ax.text(penjualan_harian_df["order_date"].iloc[i], value + 0.5, str(value), color='black', fontsize=12, ha='center')
+# Adding data labels
+for i, value in enumerate(pengunjung_bulanan_df["total_visitors"]):
+    ax.text(
+        pengunjung_bulanan_df["dteday"].iloc[i],
+        value + 0.5,
+        str(value),
+        color='black',
+        fontsize=10,
+        ha='center'
+    )
 
-ax.tick_params(axis='y', labelsize=20)
-ax.tick_params(axis='x', labelsize=15)
+# Chart settings
+ax.set_title("Monthly Visitor Count", fontsize=18)
+ax.set_xlabel("Month", fontsize=14)
+ax.set_ylabel("Total Visitors", fontsize=14)
+ax.legend()
+ax.tick_params(axis='y', labelsize=12)
+ax.tick_params(axis='x', labelsize=12, rotation=45)
 
 # Display the chart in Streamlit
 st.pyplot(fig)
 
-st.subheader('Customer Count per Age Group (Line Chart)')
 
-# Create age group data for line chart (Adults, Seniors, Youth)
-adults_df = main_df[main_df["age_group"] == "Adults"].resample(rule='D', on='order_date').agg({
-    "customer_id": "nunique"
-}).rename(columns={"customer_id": "Adults"}).reset_index()
+# Load data
+# df = pd.read_csv("hour.csv")
+all_df['dteday'] = pd.to_datetime(all_df['dteday'])
 
-seniors_df = main_df[main_df["age_group"] == "Seniors"].resample(rule='D', on='order_date').agg({
-    "customer_id": "nunique"
-}).rename(columns={"customer_id": "Seniors"}).reset_index()
+# Mapping untuk season dan weathersit
+season_mapping = {
+    1: 'Spring', 
+    2: 'Summer',
+    3: 'Fall', 
+    4: 'Winter'
+}
 
-youth_df = main_df[main_df["age_group"] == "Youth"].resample(rule='D', on='order_date').agg({
-    "customer_id": "nunique"
-}).rename(columns={"customer_id": "Youth"}).reset_index()
+weather_mapping = {
+    1: 'Clear/Partly Cloudy',
+    2: 'Mist/Cloudy',
+    3: 'Light Rain/Snow',
+    4: 'Heavy Rain/Snow'
+}
 
-# Merge the age group dataframes on order_date
-umur_df = pd.merge(adults_df, seniors_df, on="order_date", how="outer")
-umur_df = pd.merge(umur_df, youth_df, on="order_date", how="outer")
-umur_df.fillna(0, inplace=True)
+all_df['season_name'] = all_df['season'].map(season_mapping)
+all_df['weather_name'] = all_df['weathersit'].map(weather_mapping)
 
-# Plot the line chart for age group counts
+st.title('Analysis of the Effect of Weather on the Number of Bicycles Rent')
+
+# 1. Analisis berdasarkan Musim
+st.header('1. Season Effect')
+
+fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Box plot musim
+sns.boxplot(data=all_df, x='season_name', y='cnt', ax=ax1)
+ax1.set_title('Distribution of Rent Amount per Season')
+ax1.set_xlabel('Season')
+ax1.set_ylabel('Rent Amount')
+ax1.tick_params(axis='x', rotation=45)
+
+st.pyplot(fig1)
+
+# ANOVA test untuk musim
+season_groups = [group['cnt'].values for name, group in all_df.groupby('season')]
+f_stat, p_val = stats.f_oneway(*season_groups)
+st.write(f"ANOVA Test for Season: F-statistic = {f_stat:.2f}, p-value = {p_val:.10f}")
+
+# 2. Analisis berdasarkan Kondisi Cuaca
+st.header('2. Impact of Weather Conditions (Weather Situation)')
+
+fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Box plot kondisi cuaca
+sns.boxplot(data=all_df, x='weather_name', y='cnt', ax=ax3)
+ax3.set_title('Distribution of Rent Amounts per Weather Condition')
+ax3.set_xlabel('Weather Condition')
+ax3.set_ylabel('Rent Amount')
+ax3.tick_params(axis='x', rotation=45)
+
+# Bar plot rata-rata peminjaman per kondisi cuaca
+weather_avg = all_df.groupby('weather_name')['cnt'].mean().sort_values(ascending=False)
+weather_avg.plot(kind='bar', ax=ax4)
+ax4.set_title('Rata-rata Peminjaman per Kondisi Cuaca')
+ax4.set_xlabel('Kondisi Cuaca')
+ax4.set_ylabel('Rata-rata Peminjaman')
+ax4.tick_params(axis='x', rotation=45)
+
+st.pyplot(fig2)
+
+# 3. Analisis Korelasi dengan Faktor Cuaca Numerik
+st.header('3. Correlation with Weather Factors')
+
+# Heatmap korelasi
+weather_factors = ['temp', 'atemp', 'hum', 'windspeed', 'cnt']
+correlation_matrix = all_df[weather_factors].corr()
+
+fig3 = plt.figure(figsize=(10, 8))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0)
+plt.title('Correlation Heatmap: Weather Factors vs Rentals')
+st.pyplot(fig3)
+
+# 4. Analisis Detail per Faktor Numerik
+st.header('4. Detailed Analysis per Factor')
+
+fig4, axes = plt.subplots(2, 2, figsize=(15, 12))
+axes = axes.ravel()
+
+# Temperature
+sns.scatterplot(data=all_df, x='temp', y='cnt', ax=axes[0])
+axes[0].set_title('Temperature vs Rentals')
+axes[0].set_xlabel('Normalized Temperature')
+axes[0].set_ylabel('Number of Rentals')
+
+# Feels-like Temperature
+sns.scatterplot(data=all_df, x='atemp', y='cnt', ax=axes[1])
+axes[1].set_title('Feels-like Temperature vs Rentals')
+axes[1].set_xlabel('Normalized Feels-like Temperature')
+axes[1].set_ylabel('Number of Rentals')
+
+# Humidity
+sns.scatterplot(data=all_df, x='hum', y='cnt', ax=axes[2])
+axes[2].set_title('Humidity vs Rentals')
+axes[2].set_xlabel('Normalized Humidity')
+axes[2].set_ylabel('Number of Rentals')
+
+# Wind Speed
+sns.scatterplot(data=all_df, x='windspeed', y='cnt', ax=axes[3])
+axes[3].set_title('Wind Speed vs Rentals')
+axes[3].set_xlabel('Normalized Wind Speed')
+axes[3].set_ylabel('Number of Rentals')
+
+st.pyplot(fig4)
+
+# 5. Ringkasan Statistik
+st.header('5. Summary')
+
+# Korelasi dengan cnt
+correlations = all_df[weather_factors].corr()['cnt'].sort_values(ascending=False)
+st.write("Correlation between count and rent bike:")
+st.write(correlations)
+
+# Statistik deskriptif per musim
+st.write("\nStatistical description per season:")
+st.write(all_df.groupby('season_name')['cnt'].describe())
+
+# Statistik deskriptif per kondisi cuaca
+st.write("\nDescriptive statistics per weather condition:")
+st.write(all_df.groupby('weather_name')['cnt'].describe())
+
+# 6. Kesimpulan
+st.header('6. Conclution')
+
+
+st.write("""
+Based on the results of the analysis, the following results was:
+
+1. **Seasonal Effect:**
+   - Fall and Summer have the highest loan amounts
+   - Winter and Spring have the lowest loan amounts
+   - The difference between each season was significant at statistik (p-value < 0.05)
+
+2. **Weather Conditions Effect:**
+   - Partly Cloudy have the highest loan amounts
+   - Heavy Rain/Snow Winter and Spring have the lowest loan amounts
+   - There is a significant drop in renting bike when the weather deteriorates
+
+3. **Korelasi Faktor Cuaca:**
+   - Temperature (temp) dan feels-like temperature (atemp) has a strong positive correlation with the number of loans
+   - Humidity (hum) has a weak negative correlation with the number of loans
+   - Wind speed (windspeed) has a weak negative correlation with the number of loans
+
+4. **Recomendation:**
+   - Increase bicycle availability in Fall and Summer seasons
+   - Adjust the number of bicycles available based on the weather forecast
+   - Pay special attention to bike maintenance during extreme weather seasons
+""")
+
+# 1. Data Loading and Preprocessing
+main_df = all_df[
+    (all_df["dteday"].dt.date >= start_date) &
+    (all_df["dteday"].dt.date <= end_date)
+]
+
+# Generate daily aggregation
+daily_df = main_df.resample('D', on='dteday').agg({
+    'cnt': 'sum'
+}).reset_index()
+data = daily_df.set_index('dteday')['cnt']
+
+st.header('Time Series Analysis ﾟ ⋆ ﾟ ☂︎  ﾟ ⋆ ﾟ ⋆ ')
+
+# 2. Stationarity Analysis Functions
+def check_stationarity(data, title=""):
+    """
+    Perform ADF test and create stationarity plots
+    """
+    # Perform ADF test
+    result = adfuller(data)
+    
+    st.subheader("Augmented Dickey-Fuller Test Results")
+    
+    # Print ADF test results
+    adf_output = pd.Series({
+        'Test Statistic': result[0],
+        'p-value': result[1],
+        '1% Critical Value': result[4]['1%'],
+        '5% Critical Value': result[4]['5%'],
+        '10% Critical Value': result[4]['10%']
+    })
+    
+    st.write(adf_output)
+    
+    # Interpret results
+    if result[1] < 0.05:
+        st.success("Data is stationary (reject H0)")
+    else:
+        st.warning("Data is non-stationary (fail to reject H0)")
+    
+    # Create visualization
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+    
+    # Time series plot
+    ax1.plot(data)
+    ax1.set_title(f'Time Series Plot: {title}')
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel('Number of Rentals')
+    ax1.grid(True)
+    
+    # Rolling statistics
+    rolling_mean = data.rolling(window=7).mean()
+    rolling_std = data.rolling(window=7).std()
+    
+    ax2.plot(data, label='Original')
+    ax2.plot(rolling_mean, label='Rolling Mean')
+    ax2.plot(rolling_std, label='Rolling Std')
+    ax2.set_title('Rolling Statistics')
+    ax2.set_xlabel('Date')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    return result[1] < 0.05
+
+def perform_decomposition(data):
+    """
+    Perform seasonal decomposition
+    """
+    decomposition = seasonal_decompose(data, period=7)
+    
+    # Plot decomposition
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(15, 12))
+    
+    decomposition.observed.plot(ax=ax1)
+    ax1.set_title('Observed')
+    ax1.grid(True)
+    
+    decomposition.trend.plot(ax=ax2)
+    ax2.set_title('Trend')
+    ax2.grid(True)
+    
+    decomposition.seasonal.plot(ax=ax3)
+    ax3.set_title('Seasonal')
+    ax3.grid(True)
+    
+    decomposition.resid.plot(ax=ax4)
+    ax4.set_title('Residual')
+    ax4.grid(True)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    return decomposition
+
+# 3. Perform Stationarity Analysis
+st.subheader("Original Data Analysis")
+is_stationary = check_stationarity(data, "Original Data")
+
+# If data is not stationary, perform differencing
+if not is_stationary:
+    st.subheader("First Difference Analysis")
+    diff_data = data.diff().dropna()
+    is_stationary_diff = check_stationarity(diff_data, "First Difference")
+    
+    # If still not stationary, try seasonal differencing
+    if not is_stationary_diff:
+        st.subheader("Seasonal Difference Analysis")
+        seasonal_diff = diff_data.diff(7).dropna()  # 7 for weekly seasonality
+        is_stationary_seasonal = check_stationarity(seasonal_diff, "Seasonal Difference")
+
+# 4. Perform Decomposition
+st.subheader("Seasonal Decomposition")
+decomp = perform_decomposition(data)
+
+# 5. SARIMA Model Functions
+def fit_sarima_model(data):
+    """
+    Fit SARIMA model with parameters based on stationarity analysis
+    """
+    # Adjust these parameters based on the ADF test results
+    if is_stationary:
+        order = (1, 0, 1)
+        seasonal_order = (1, 0, 1, 7)
+    elif is_stationary_diff:
+        order = (1, 1, 1)
+        seasonal_order = (1, 0, 1, 7)
+    else:
+        order = (1, 1, 1)
+        seasonal_order = (1, 1, 1, 7)
+    
+    model = SARIMAX(data,
+                    order=order,
+                    seasonal_order=seasonal_order,
+                    enforce_stationarity=False,
+                    enforce_invertibility=False)
+    
+    return model.fit()
+
+def evaluate_model(actual, predicted):
+    """
+    Calculate evaluation metrics
+    """
+    mae = mean_absolute_error(actual, predicted)
+    mse = mean_squared_error(actual, predicted)
+    rmse = np.sqrt(mse)
+    
+    return {
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse
+    }
+
+# 6. Fit Model and Make Predictions
+st.subheader("Fitting SARIMA Model")
+with st.spinner('Fitting SARIMA Model...'):
+    model_results = fit_sarima_model(data)
+    predictions = model_results.get_prediction(start=data.index[0])
+    predicted_mean = predictions.predicted_mean
+    pred_conf = predictions.conf_int()
+
+# 7. Display Results
+# Model summary
+with st.expander("View Model Summary"):
+    st.text(str(model_results.summary()))
+
+# Calculate and display metrics
+metrics = evaluate_model(data, predicted_mean)
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("MAE", f"{metrics['MAE']:.2f}")
+with col2:
+    st.metric("MSE", f"{metrics['MSE']:.2f}")
+with col3:
+    st.metric("RMSE", f"{metrics['RMSE']:.2f}")
+
+# 8. Plot Results
+# st.subheader('Bike Sharing Demand Analysis with SARIMA')
 fig, ax = plt.subplots(figsize=(16, 8))
 
-ax.plot(umur_df["order_date"], umur_df["Adults"], label="Adults", marker='o', linewidth=2, color="#C68E17")
-ax.plot(umur_df["order_date"], umur_df["Seniors"], label="Seniors", marker='o', linewidth=2, color="#7C0A02")
-ax.plot(umur_df["order_date"], umur_df["Youth"], label="Youth", marker='o', linewidth=2, color="#6495ED")
+# Plot actual values
+ax.plot(data.index, data, label='Actual', color='blue')
 
-# Add data labels for each age group
-for i, value in enumerate(umur_df["Adults"]):
-    ax.text(umur_df["order_date"].iloc[i], value + 0.5, str(int(value)), color='black', fontsize=12, ha='center')
-    
-for i, value in enumerate(umur_df["Seniors"]):
-    ax.text(umur_df["order_date"].iloc[i], value + 0.5, str(int(value)), color='black', fontsize=12, ha='center')
-    
-for i, value in enumerate(umur_df["Youth"]):
-    ax.text(umur_df["order_date"].iloc[i], value + 0.5, str(int(value)), color='black', fontsize=12, ha='center')
+# Plot predicted values
+ax.plot(predicted_mean.index, predicted_mean, label='Predicted', color='red', linestyle='--')
 
-# Add average age descriptions 
-ax.text(0.02, 0.95, 'Adults: Age Between = 25-64', transform=ax.transAxes, fontsize=15, color="#ff6347", ha='left', va='top')
-ax.text(0.02, 0.90, 'Seniors: Age Between = 65-80', transform=ax.transAxes, fontsize=15, color="#4682b4", ha='left', va='top')
-ax.text(0.02, 0.85, 'Youth: Age Between = 20-24', transform=ax.transAxes, fontsize=15, color="#5c4219", ha='left', va='top')
+# Plot confidence intervals
+ax.fill_between(pred_conf.index,
+                pred_conf.iloc[:, 0],
+                pred_conf.iloc[:, 1],
+                color='red',
+                alpha=0.1,
+                label='95% Confidence Interval')
 
-ax.set_title("Customer Counts by Age Group over Time", fontsize=20)
-ax.set_xlabel("Order Date", fontsize=15)
-ax.set_ylabel("Customer Count", fontsize=15)
-
-ax.tick_params(axis='x', labelsize=12)
-ax.tick_params(axis='y', labelsize=12)
+# Customize plot
+ax.set_title("Bike Sharing Demand: Actual vs Predicted (SARIMA)", fontsize=20)
+ax.set_xlabel("Date", fontsize=15)
+ax.set_ylabel("Number of Rentals", fontsize=15)
 ax.legend(fontsize=12)
+ax.grid(True)
+plt.xticks(rotation=45)
 
+# Display plot
 st.pyplot(fig)
 
+data = pd.DataFrame(all_df)  # Replace with your data loading method
+column = 'cnt'
 
-
-st.subheader("Items with the most and least sales")
-
-fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(35, 15))
-
-colors = ["#4287f5", "#D3D3D3", "#D3D3D3", "#D3D3D3", "#D3D3D3"]
-
-# Plot the top 5 products
-sns.barplot(x="quantity_x", y="product_name", data=sum_penjualan_barang_df.head(5), palette=colors, ax=ax[0])
-ax[0].set_ylabel(None)
-ax[0].set_xlabel("Jumlah Penjualan", fontsize=30)
-ax[0].set_title("Produk Paling Laris", loc="center", fontsize=50)
-ax[0].tick_params(axis='y', labelsize=35)
-ax[0].tick_params(axis='x', labelsize=30)
-
-# Add data labels for the first plot
-for i, v in enumerate(sum_penjualan_barang_df.head(5)["quantity_x"]):
-    ax[0].text(v + 1, i, str(v), color='black', fontsize=30, va='center')
-
-# Plot the worst 5 products
-sns.barplot(x="quantity_x", y="product_name", data=sum_penjualan_barang_df.tail(5), palette=colors, ax=ax[1])
-ax[1].set_ylabel(None)
-ax[1].set_xlabel("Jumlah Penjualan", fontsize=30)
-ax[1].set_title("Produk Kurang Laris", loc="center", fontsize=50)
-ax[1].tick_params(axis='y', labelsize=35)
-ax[1].tick_params(axis='x', labelsize=30)
-
-# Add data labels for the second plot
-for i, v in enumerate(sum_penjualan_barang_df.tail(5)["quantity_x"]):
-    ax[1].text(v + 1, i, str(v), color='black', fontsize=30, va='center')
-
-st.pyplot(fig)
-
-st.subheader("Customer Distribution")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    fig, ax = plt.subplots(figsize=(20, 10))
+# Function for differencing analysis
+def perform_differencing_analysis(data, column='cnt', max_diff=2):
+    fig, axes = plt.subplots(max_diff + 1, 2, figsize=(15, 4*(max_diff+1)))
     
-    sns.barplot(
-        y="customer_count",
-        x="gender",
-        data=byjk_df.sort_values(by="customer_count", ascending=False),
-        palette=colors,
-        ax=ax
-    )
+    # Original series analysis
+    series = data[column].copy()
+    result = adfuller(series)
     
-    # Adding data labels
-    for p in ax.patches:
-        ax.text(
-            p.get_x() + p.get_width() / 2,  # X-coordinate (center of bar)
-            p.get_height(),  # Y-coordinate (top of the bar)
-            int(p.get_height()),  # Label text
-            ha="center", va="bottom", fontsize=25  # Text alignment and size
-        )
+    # Plot original series
+    axes[0, 0].plot(series)
+    axes[0, 0].set_title(f'Original Series (ADF p-value: {result[1]:.4f})')
+    axes[0, 0].set_xlabel('Time')
+    axes[0, 0].set_ylabel('Value')
     
-    ax.set_title("Number of Customers by Gender", loc="center", fontsize=50)
-    ax.set_ylabel(None)
-    ax.set_xlabel(None)
-    ax.tick_params(axis='x', labelsize=35)
-    ax.tick_params(axis='y', labelsize=30)
-    st.pyplot(fig)
+    # Plot ACF of original series
+    pd.plotting.autocorrelation_plot(series, ax=axes[0, 1])
+    axes[0, 1].set_title('ACF of Original Series')
+    
+    # Perform differencing
+    for d in range(1, max_diff + 1):
+        diff_series = series.diff(d).dropna()
+        result = adfuller(diff_series)
+        
+        # Plot differenced series
+        axes[d, 0].plot(diff_series)
+        axes[d, 0].set_title(f'{d}-Order Difference (ADF p-value: {result[1]:.4f})')
+        axes[d, 0].set_xlabel('Time')
+        axes[d, 0].set_ylabel('Value')
+        
+        # Plot ACF of differenced series
+        pd.plotting.autocorrelation_plot(diff_series, ax=axes[d, 1])
+        axes[d, 1].set_title(f'ACF of {d}-Order Difference')
+    
+    plt.tight_layout()
+    return fig
+
+st.write (""" Dikarenakan tingkat akurasi time series masih kurang akurat dimana Mean Absolute Error ada diangka 638.94 dan Root Mean Squared Error sebesar 918.56
+          maka perlu dilakukan diferencing analisis, adf test, dan fitting ke model Sarima yang baru.
+          """)
+
+# Streamlit App
+st.title("Time Series Analysis")
+
+# Input options
+max_diff = st.sidebar.slider("Select maximum differencing order", 1, 5, 2)
+forecast_steps = st.sidebar.slider("Forecast Steps", 1, 24, 12)
+
+# Perform differencing analysis
+st.subheader("Differencing Analysis")
+fig_diff = perform_differencing_analysis(data, column=column, max_diff=max_diff)
+st.pyplot(fig_diff)
+
+# Stationarity Tests (ADF)
+st.subheader("ADF Stationarity Test Results")
+for d in range(3):
+    if d == 0:
+        series = data[column]
+    else:
+        series = data[column].diff(d).dropna()
+    
+    result = adfuller(series)
+    st.write(f"\n{d}-Order Difference" if d > 0 else "Original Series:")
+    st.write(f"ADF Statistic: {result[0]:.4f}")
+    st.write(f"p-value: {result[1]:.4f}")
+    st.write("Critical values:")
+    for key, value in result[4].items():
+        st.write(f"\t{key}: {value:.4f}")
+
+# SARIMA Model Fitting
+st.subheader("SARIMA Model Fitting")
+order = (1, 0, 1)
+seasonal_order = (1, 0, 1, 12)
+
+model = SARIMAX(data[column], order=order, seasonal_order=seasonal_order, enforce_stationarity=False, enforce_invertibility=False)
+sarima_fit = model.fit(disp=False)
+
+# Display Model Summary
+st.write(sarima_fit.summary())
+
+# Diagnostic Plots
+st.subheader("SARIMA Diagnostic Plots")
+fig_diag = sarima_fit.plot_diagnostics(figsize=(15, 8))
+st.pyplot(fig_diag)
+
+# Forecasting
+st.subheader("Forecast Results")
+forecast = sarima_fit.get_forecast(steps=forecast_steps)
+forecast_mean = forecast.predicted_mean
+forecast_ci = forecast.conf_int()
+
+# Evaluation Metrics
+st.subheader("Evaluation Metrics")
+# Select data to compare forecasted values
+actual = data[column][-forecast_steps:]  # Adjust for available data if shorter
+if len(actual) >= forecast_steps:
+    actual = actual[-forecast_steps:]  # Adjust to match forecast steps if necessary
+
+# Calculate MAE, MSE, RMSE
+mae = mean_absolute_error(actual, forecast_mean)
+mse = mean_squared_error(actual, forecast_mean)
+rmse = np.sqrt(mse)
+
+# Display Metrics
+st.write(f"**Mean Absolute Error (MAE):** {mae:.2f}")
+st.write(f"**Mean Squared Error (MSE):** {mse:.2f}")
+st.write(f"**Root Mean Squared Error (RMSE):** {rmse:.2f}")
+
+# Plot actual vs predicted
+fig_forecast = plt.figure(figsize=(15, 6))
+plt.plot(data.index, data[column], label='Actual', color='blue')
+plt.plot(forecast_mean.index, forecast_mean, label='Predicted', color='red')
+plt.fill_between(forecast_ci.index, forecast_ci.iloc[:, 0], forecast_ci.iloc[:, 1], color='pink', alpha=0.3)
+plt.title('Actual vs Predicted Bike Rentals')
+plt.xlabel('Date')
+plt.ylabel('Number of Rentals')
+plt.legend()
+st.pyplot(fig_forecast)
+
+actual = all_df['cnt'][-forecast_steps:]
+predicted = forecast_mean
+
+st.write("**Nilai Prediksi:**")
+for idx, value in zip(predicted.index, predicted):
+    st.write(f"Date: {idx}, Predicted: {value:.2f}")
+
+
+
+
+
+def create_descriptive_stats(df):
+    holiday_stats = df.groupby('holiday')[['casual', 'registered', 'cnt']].describe()
+    workingday_stats = df.groupby('workingday')[['casual', 'registered', 'cnt']].describe()
+    return holiday_stats, workingday_stats
+
+def create_boxplots(df):
+    fig = plt.figure(figsize=(14, 6))
+    
+    plt.subplot(1, 3, 1)
+    sns.boxplot(data=df, x='holiday', y='casual')
+    plt.title("Casual Users on Holiday vs Non-Holiday")
+    
+    plt.subplot(1, 3, 2)
+    sns.boxplot(data=df, x='holiday', y='registered')
+    plt.title("Registered Users on Holiday vs Non-Holiday")
+    
+    plt.subplot(1, 3, 3)
+    sns.boxplot(data=df, x='holiday', y='cnt')
+    plt.title("Total Rentals on Holiday vs Non-Holiday")
+    
+    plt.tight_layout()
+    return fig
+
+def perform_statistical_tests(df):
+    results = []
+    
+    # Holiday tests
+    for column in ['casual', 'registered', 'cnt']:
+        holiday_data = df[df['holiday'] == 1][column]
+        non_holiday_data = df[df['holiday'] == 0][column]
+        
+        stat, p_val = ttest_ind(holiday_data, non_holiday_data)
+        results.append({
+            'test_type': 'Holiday',
+            'variable': column,
+            'p_value': p_val,
+            'significant': p_val < 0.05
+        })
+    
+    # Workingday tests
+    for column in ['casual', 'registered', 'cnt']:
+        workingday_data = df[df['workingday'] == 1][column]
+        non_workingday_data = df[df['workingday'] == 0][column]
+        
+        stat, p_val = ttest_ind(workingday_data, non_workingday_data)
+        results.append({
+            'test_type': 'Workingday',
+            'variable': column,
+            'p_value': p_val,
+            'significant': p_val < 0.05
+        })
+    
+    # Weekday tests
+    for column in ['casual', 'registered', 'cnt']:
+        groups = [df[df['weekday'] == i][column] for i in range(7)]
+        stat, p_val = f_oneway(*groups)
+        results.append({
+            'test_type': 'Weekday',
+            'variable': column,
+            'p_value': p_val,
+            'significant': p_val < 0.05
+        })
+    
+    return pd.DataFrame(results)
+
+def run_regression(df):
+    X = df[['holiday', 'workingday', 'weekday']]
+    X = sm.add_constant(X)
+    nb_model = sm.GLM(df['cnt'], X, family=sm.families.NegativeBinomial())
+    return nb_model.fit()
+
+def main():
+    st.title('Bike Rental Analysis with Negative Binomial Regression')
+    
+    try:
+        # Menggunakan all_df yang sudah ada
+        df = all_df.copy()
+        
+        # Memastikan format tanggal
+        df['dteday'] = pd.to_datetime(df['dteday'])
+        df.sort_values(by="dteday", inplace=True)
+        df = df.reset_index(drop=True)
+        
+        # st.success('Data ready for analysis!')
+        
+        # Show data preview
+        st.subheader('Data Preview')
+        st.dataframe(df.head())
+        
+        # Sidebar
+        st.sidebar.header('Analysis Options')
+        show_descriptive = st.sidebar.checkbox('Show Descriptive Statistics', True)
+        show_plots = st.sidebar.checkbox('Show Box Plots', True)
+        show_tests = st.sidebar.checkbox('Show Statistical Tests', True)
+        show_regression = st.sidebar.checkbox('Show Regression Results', True)
+        
+        # Main content
+        if show_descriptive:
+            st.header('Descriptive Statistics')
+            holiday_stats, workingday_stats = create_descriptive_stats(df)
+            
+            st.subheader('Holiday Statistics')
+            st.dataframe(holiday_stats)
+            
+            st.subheader('Working Day Statistics')
+            st.dataframe(workingday_stats)
+        
+        if show_plots:
+            st.header('Box Plots')
+            fig = create_boxplots(df)
+            st.pyplot(fig)
+        
+        if show_tests:
+            st.header('Statistical Tests Results')
+            test_results = perform_statistical_tests(df)
+            st.dataframe(test_results)
+        
+        if show_regression:
+            st.header('Negative Binomial Regression Results')
+            regression_results = run_regression(df)
+            st.text(regression_results.summary().as_text())
+            st.write("""
+                     Based on the results of the Negative Binomial Regression analysis, the following results was:
+                     1. Coefficients Interpretation:
+                        - const (Intercept): 5.1794
+                          This is the base log count of rentals when all predictors are zero. Exponentiating this gives the baseline rental count.
+                        - holiday: -0.1430
+                          A negative coefficient, indicating that bike rentals tend to decrease on holidays. Specifically, the coefficient suggests that rentals on holidays are about 𝑒 − 0.1430 ≈ 0.87 e−0.1430≈0.87 times the rentals on non-holidays, or about a 13% decrease.
+                        - weekday: 0.0113
+                          A small positive effect, implying a slight increase in rentals per additional weekday. Each day closer to the weekend shows a minor increase in rentals, though the effect is modest.
+                     2. Statistical Significance:
+                        - All predictors (holiday, workingday, and weekday) are statistically significant (p-values < 0.05), indicating that they contribute meaningfully to explaining the variation in bike rentals.
+                     3. Model Fit:
+                        - Pseudo R-squared (CS) of 0.001983 suggests a small proportion of variance explained by this model, indicating that other variables not included in this model likely have a substantial impact on bike rentals.
+                     4. Conclution:
+                        - Holidays are associated with a decrease in bike rentals.
+                        - Working days are associated with a slight increase in rentals, likely because more people use bikes for commuting.
+                        - Weekdays contribute a very minor but positive increase in rentals.
+                     """)
+            
+    except Exception as e:
+        st.error(f'Error processing data: {str(e)}')
+
+if __name__ == '__main__':
+    main()
+    
 
     
-with col1:
-    fig, ax = plt.subplots(figsize=(20, 10))
-    colors = ["#D3D3D3", "#90CAF9", "#D3D3D3", "#D3D3D3", "#D3D3D3"]
-    
-    sns.barplot(
-        y="customer_count",
-        x="age_group",
-        data=byumur_df.sort_values(by="customer_count", ascending=False),
-        palette=colors,
-        ax=ax
-    )
-    
-    # Adding data labels
-    for p in ax.patches:
-        ax.text(
-            p.get_x() + p.get_width() / 2,
-            p.get_height(),
-            int(p.get_height()),
-            ha="center", va="bottom", fontsize=25
-        )
-    
-    ax.set_title("Number of Customers by Age", loc="center", fontsize=50)
-    ax.set_ylabel(None)
-    ax.set_xlabel(None)
-    ax.tick_params(axis='x', labelsize=35)
-    ax.tick_params(axis='y', labelsize=30)
-    st.pyplot(fig)
-
-    
-with col2:    
-    fig, ax = plt.subplots(figsize=(20, 10))
-    colors = ["#90CAF9", "#D3D3D3", "#D3D3D3", "#D3D3D3", "#D3D3D3", "#D3D3D3", "#D3D3D3", "#D3D3D3"]
-    
-    sns.barplot(
-        x="customer_count", 
-        y="state",
-        data=bydaerah_df.sort_values(by="customer_count", ascending=False),
-        palette=colors,
-        ax=ax
-    )
-    
-    # Adding data labels
-    for p in ax.patches:
-        ax.text(
-            p.get_width(),  # X-coordinate (width of the bar)
-            p.get_y() + p.get_height() / 2,  # Y-coordinate (center of the bar)
-            int(p.get_width()),  # Label text
-            ha="left", va="center", fontsize=15  # Text alignment and size
-        )
-    
-    ax.set_title("Number of Customer by States", loc="center", fontsize=30)
-    ax.set_ylabel(None)
-    ax.set_xlabel(None)
-    ax.tick_params(axis='y', labelsize=20)
-    ax.tick_params(axis='x', labelsize=15)
-    st.pyplot(fig)
-    
-    
-st.subheader('Most Sold Sizes (Column Chart)')
-
-# Filter data untuk mengecualikan ukuran dengan huruf kecil ('l', 'm', 'xl')
-main_df_filtered = main_df[~main_df['size'].isin(['l', 'm', 'xl'])]
-
-# Agregasi data penjualan berdasarkan ukuran
-size_sales_df = main_df_filtered.groupby('size').agg({
-    "customer_id": "nunique"  # Menghitung jumlah customer unik
-}).rename(columns={"customer_id": "Sales Count"}).reset_index()
-
-# Urutkan data berdasarkan sales count secara descending
-size_sales_df.sort_values(by="Sales Count", ascending=False, inplace=True)
-
-# Plot chart kolom
-fig, ax = plt.subplots(figsize=(12, 6))
-sns.barplot(x="size", y="Sales Count", data=size_sales_df, palette="coolwarm", ax=ax)
-
-# Tambahkan label data ke tiap bar
-for i in ax.containers:
-    ax.bar_label(i, fmt='%d', label_type='edge', fontsize=12)
-
-# Pengaturan judul dan label
-ax.set_title("Most Sold Sizes", fontsize=20)
-ax.set_xlabel("Size", fontsize=15)
-ax.set_ylabel("Sales Count", fontsize=15)
-
-# Pengaturan ukuran label pada sumbu x dan y
-ax.tick_params(axis='x', labelsize=12)
-ax.tick_params(axis='y', labelsize=12)
-
-# Tampilkan grafik
-st.pyplot(fig)
-
-
-
-st.subheader('Most and Least Sold Product Types (Comparison)')
-
-# Aggregate product type sales data
-product_type_sales_df = main_df.groupby('product_type').agg({
-    "customer_id": "nunique"
-}).rename(columns={"customer_id": "Sales Count"}).reset_index()
-
-# Find the most sold and least sold product types
-most_sold = product_type_sales_df.loc[product_type_sales_df["Sales Count"].idxmax()]
-least_sold = product_type_sales_df.loc[product_type_sales_df["Sales Count"].idxmin()]
-
-# Create a comparison DataFrame
-comparison_df = pd.DataFrame({
-    "Product Type": [most_sold["product_type"], least_sold["product_type"]],
-    "Sales Count": [most_sold["Sales Count"], least_sold["Sales Count"]],
-    "Type": ["Most Sold", "Worst Selling"]  # Changed to 'Worst Selling'
-})
-
-# Plot the comparison
-fig, ax = plt.subplots(figsize=(8, 5))
-sns.barplot(x="Sales Count", y="Product Type", hue="Type", data=comparison_df, palette=["#5c4219", "#ff6347"], ax=ax)
-
-# Add data labels to each bar
-for i in ax.containers:
-    ax.bar_label(i, fmt='%d', label_type='edge', fontsize=12)
-
-ax.set_title("Comparison of Most and Worst Selling Product Types", fontsize=20)
-ax.set_xlabel("Sales Count", fontsize=15)
-ax.set_ylabel("Product Type", fontsize=15)
-
-ax.tick_params(axis='x', labelsize=12)
-ax.tick_params(axis='y', labelsize=12)
-ax.legend(title="Sales Type", fontsize=12)
-
-st.pyplot(fig)
-
-
-# Sales Count by Colour
-st.subheader('Sales Count by Colour')
-
-# Cek apakah ada missing values atau data duplikat
-main_df = main_df.dropna(subset=['customer_id', 'colour'])  # Hapus baris dengan missing values
-main_df = main_df.drop_duplicates()  # Hapus baris duplikat
-
-# Agregasi data penjualan berdasarkan warna, menggunakan 'nunique' untuk menghitung customer_id unik
-colour_sales_df = main_df.groupby('colour').agg({
-    "customer_id": "nunique"  # Menghitung jumlah customer unik
-}).rename(columns={"customer_id": "Sales Count"}).reset_index()
-
-# Urutkan DataFrame berdasarkan 'Sales Count' secara descending
-colour_sales_df = colour_sales_df.sort_values(by="Sales Count", ascending=False)
-
-# Buat plot bar untuk sales count berdasarkan warna
-fig, ax = plt.subplots(figsize=(8, 5))
-sns.barplot(x="Sales Count", y="colour", data=colour_sales_df, palette="viridis", ax=ax)
-
-# Menambahkan label pada setiap bar
-for index, value in enumerate(colour_sales_df['Sales Count']):
-    ax.text(value, index, str(value), color='black', va='center')
-
-# Pengaturan judul dan label
-ax.set_title("Sales Count by Colour", fontsize=20)
-ax.set_xlabel("Sales Count", fontsize=15)
-ax.set_ylabel("Colour", fontsize=15)
-
-# Pengaturan ukuran label pada sumbu x dan y
-ax.tick_params(axis='x', labelsize=12)
-ax.tick_params(axis='y', labelsize=12)
-
-# Tampilkan grafik
-st.pyplot(fig)
-
-
-# Best Customer Based on RFM Parameters
-st.subheader("Best Customer Based on RFM Parameters")
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    avg_recency = round(rfm_df.recency.mean(), 1)
-    st.metric("Average Recency (days)", value=avg_recency)
-
-with col2:
-    avg_frequency = round(rfm_df.frequency.mean(), 2)
-    st.metric("Average Frequency", value=avg_frequency)
-
-with col3:
-    avg_frequency = format_currency(rfm_df.monetary.mean(), "AUD", locale='es_CO') 
-    st.metric("Average Monetary", value=avg_frequency)
-
-fig, ax = plt.subplots(nrows=1, ncols=3, figsize=(35, 15))
-colors = ["#90CAF9", "#90CAF9", "#90CAF9", "#90CAF9", "#90CAF9"]
-
-sns.barplot(y="recency", x="customer_id", data=rfm_df.sort_values(by="recency", ascending=True).head(5), palette=colors, ax=ax[0])
-ax[0].set_ylabel(None)
-ax[0].set_xlabel("customer_id", fontsize=30)
-ax[0].set_title("By Recency (days)", loc="center", fontsize=50)
-ax[0].tick_params(axis='y', labelsize=30)
-ax[0].tick_params(axis='x', labelsize=35)
-
-sns.barplot(y="frequency", x="customer_id", data=rfm_df.sort_values(by="frequency", ascending=False).head(5), palette=colors, ax=ax[1])
-ax[1].set_ylabel(None)
-ax[1].set_xlabel("customer_id", fontsize=30)
-ax[1].set_title("By Frequency", loc="center", fontsize=50)
-ax[1].tick_params(axis='y', labelsize=30)
-ax[1].tick_params(axis='x', labelsize=35)
-
-sns.barplot(y="monetary", x="customer_id", data=rfm_df.sort_values(by="monetary", ascending=False).head(5), palette=colors, ax=ax[2])
-ax[2].set_ylabel(None)
-ax[2].set_xlabel("customer_id", fontsize=30)
-ax[2].set_title("By Monetary", loc="center", fontsize=50)
-ax[2].tick_params(axis='y', labelsize=30)
-ax[2].tick_params(axis='x', labelsize=35)
-
-st.pyplot(fig)
-
-
-
-# Create city mapping
-city_mapping_df = create_city_mapping(main_df)
-
-# Get the top 5 cities by customer count
-top_cities_df = city_mapping_df.nlargest(5, 'customer_count')
-
-# Display Top 5 City Mapping Chart
-st.subheader('Top 5 Cities with the Largest Number of Customers')
-
-# Create a bar chart for customer count by city
-fig_city, ax_city = plt.subplots(figsize=(12, 6))
-sns.barplot(x='customer_count', y='city', data=top_cities_df, ax=ax_city, palette='viridis')
-
-ax_city.set_title('Top 5 Cities with the Largest Number of Customers', fontsize=18)
-ax_city.set_xlabel('Number of Customers', fontsize=14)
-ax_city.set_ylabel('City', fontsize=14)
-
-# Add data labels above each bar
-for index, value in enumerate(top_cities_df['customer_count']):
-    ax_city.text(value, index, str(value), color='black', va='center')
-
-# Display the top cities mapping chart in Streamlit
-st.pyplot(fig_city)
-
-# Sentiment and Wordcloud Analysis
-st.subheader('Word Cloud and Sentiment Analysis')
-
 
 # Footer
 st.write('Built by Salman Fadhilurrohman © 2024 Dicoding Submission')
